@@ -1,0 +1,334 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# =====================================================
+# DATA GENERATION MODULE: Simulated Medical Data Creation
+# =====================================================
+
+class DataGenerator:
+    """Generates synthetic clinical and PPG features for AF screening simulation"""
+    
+    def __init__(self, num_samples=1000, af_ratio=0.3):
+        self.num_samples = num_samples
+        self.af_ratio = af_ratio
+    
+    def generate_clinical_features(self):
+        """Creates 11 clinical features (PAF model inputs)"""
+        features = {
+            # Body metrics (4 features)
+            'age': np.random.normal(65, 10, self.num_samples),
+            'height': np.random.normal(170, 10, self.num_samples),
+            'weight': np.random.normal(70, 15, self.num_samples),
+            'bmi': np.random.normal(25, 5, self.num_samples),
+            
+            # Vital signs (3 features)
+            'pulse_rate': np.random.normal(75, 15, self.num_samples),
+            'systolic_bp': np.random.normal(130, 20, self.num_samples),
+            'diastolic_bp': np.random.normal(80, 10, self.num_samples),
+            
+            # Lifestyle factors (2 features)
+            'smoking': np.random.choice([0, 1], self.num_samples, p=[0.7, 0.3]),
+            'antihypertensive': np.random.choice([0, 1], self.num_samples, p=[0.6, 0.4]),
+            
+            # Comorbidities (2 features)
+            'diabetes': np.random.choice([0, 1], self.num_samples, p=[0.8, 0.2]),
+            'heart_failure': np.random.choice([0, 1], self.num_samples, p=[0.85, 0.15]),
+            'mi_history': np.random.choice([0, 1], self.num_samples, p=[0.9, 0.1])
+        }
+        return np.column_stack(list(features.values()))
+    
+    def generate_ppg_features(self):
+        """Creates 10 PPG-derived features (EAF model inputs)"""
+        features = {
+            # Time-domain features (4 features)
+            'rmssd': np.random.exponential(0.1, self.num_samples),
+            'sdsd': np.random.exponential(0.05, self.num_samples),
+            'pnn70': np.random.uniform(0, 0.3, self.num_samples),
+            'sdnn': np.random.exponential(0.08, self.num_samples),
+            
+            # Frequency-domain features (3 features)
+            'lf_power': np.random.gamma(2, 0.5, self.num_samples),
+            'hf_power': np.random.gamma(1.5, 0.7, self.num_samples),
+            'lf_hf_ratio': np.random.uniform(0.5, 2.5, self.num_samples),
+            
+            # Entropy features (2 features)
+            'shannon_entropy': np.random.normal(1.5, 0.3, self.num_samples),
+            'sample_entropy': np.random.normal(1.2, 0.4, self.num_samples),
+            
+            # Poincaré analysis (1 feature)
+            'sd1_sd2': np.random.uniform(0.2, 0.8, self.num_samples)
+        }
+        return np.column_stack(list(features.values()))
+    
+    def generate_labels(self):
+        """Generates AF classification labels (1=AF, 0=NSR)"""
+        labels = np.zeros(self.num_samples)
+        af_samples = int(self.num_samples * self.af_ratio)
+        labels[:af_samples] = 1
+        np.random.shuffle(labels)
+        return labels.reshape(-1, 1)
+    
+    def generate_dataset(self):
+        """Produces complete dataset with clinical, PPG, and label data"""
+        clinical_data = self.generate_clinical_features()
+        ppg_data = self.generate_ppg_features()
+        labels = self.generate_labels()
+        
+        return clinical_data, ppg_data, labels
+
+# =====================================================
+# MODEL ARCHITECTURE MODULE: Neural Network Implementations
+# =====================================================
+
+class PAFModel:
+    """Clinical Prior Model: 3-layer MLP for AF risk assessment"""
+    
+    def __init__(self, input_dim=11):
+        self.model = self._build_model(input_dim)
+        
+    def _build_model(self, input_dim):
+        """Constructs 11-64-32-1 MLP architecture with regularization"""
+        model = models.Sequential([
+            layers.Input(shape=(input_dim,)),
+            layers.Dense(64),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            layers.Dropout(0.3),
+            
+            layers.Dense(32),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            layers.Dropout(0.3),
+            
+            layers.Dense(1, activation='sigmoid')
+        ])
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss='binary_crossentropy',
+            metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
+        )
+        return model
+    
+    def train(self, X_train, y_train, epochs=100, batch_size=64):
+        """Training procedure with early stopping"""
+        early_stop = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss', patience=10, restore_best_weights=True)
+        
+        history = self.model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=0.2,
+            callbacks=[early_stop],
+            verbose=2
+        )
+        return history
+
+class EAFModel:
+    """PPG Evidence Model: 3-layer MLP for physiological signal analysis"""
+    
+    def __init__(self, input_dim=10):
+        self.model = self._build_model(input_dim)
+        
+    def _build_model(self, input_dim):
+        """Constructs 10-32-16-1 MLP architecture for PPG processing"""
+        model = models.Sequential([
+            layers.Input(shape=(input_dim,)),
+            layers.Dense(32),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            layers.Dropout(0.3),
+            
+            layers.Dense(16),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            layers.Dropout(0.3),
+            
+            layers.Dense(1, activation='sigmoid')
+        ])
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss='binary_crossentropy',
+            metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
+        )
+        return model
+    
+    def train(self, X_train, y_train, epochs=100, batch_size=64):
+        """Training procedure with early stopping"""
+        early_stop = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss', patience=10, restore_best_weights=True)
+        
+        history = self.model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=0.2,
+            callbacks=[early_stop],
+            verbose=2
+        )
+        return history
+
+# =====================================================
+# BAYESIAN FUSION MODULE: PEAF Implementation
+# =====================================================
+
+class BayesianFusion:
+    """Bayesian Fusion Framework integrating clinical and PPG evidence"""
+    
+    def __init__(self, paf_model, eaf_model):
+        self.paf_model = paf_model
+        self.eaf_model = eaf_model
+        self.ppv = None
+        self.npv = None
+        self.se = None
+        self.sp = None
+    
+    def calibrate_models(self, X_val_paf, X_val_eaf, y_val):
+        """Calculates PPV/NPV for PAF and Sensitivity/Specificity for EAF"""
+        # PAF calibration
+        paf_pred = self.paf_model.predict(X_val_paf)
+        paf_pred_bin = (paf_pred > 0.5).astype(int)
+        
+        # Calculate confusion matrix components
+        tp_paf = np.sum((paf_pred_bin == 1) & (y_val == 1))
+        fp_paf = np.sum((paf_pred_bin == 1) & (y_val == 0))
+        tn_paf = np.sum((paf_pred_bin == 0) & (y_val == 0))
+        fn_paf = np.sum((paf_pred_bin == 0) & (y_val == 1))
+        
+        # Compute diagnostic metrics
+        self.ppv = tp_paf / (tp_paf + fp_paf) if (tp_paf + fp_paf) > 0 else 0
+        self.npv = tn_paf / (tn_paf + fn_paf) if (tn_paf + fn_paf) > 0 else 0
+        
+        # EAF calibration
+        eaf_pred = self.eaf_model.predict(X_val_eaf)
+        eaf_pred_bin = (eaf_pred > 0.5).astype(int)
+        
+        tp_eaf = np.sum((eaf_pred_bin == 1) & (y_val == 1))
+        tn_eaf = np.sum((eaf_pred_bin == 0) & (y_val == 0))
+        fp_eaf = np.sum((eaf_pred_bin == 1) & (y_val == 0))
+        fn_eaf = np.sum((eaf_pred_bin == 0) & (y_val == 1))
+        
+        self.se = tp_eaf / (tp_eaf + fn_eaf) if (tp_eaf + fn_eaf) > 0 else 0
+        self.sp = tn_eaf / (tn_eaf + fp_eaf) if (tn_eaf + fp_eaf) > 0 else 0
+    
+    def _compute_prior(self, paf_pred):
+        """Converts PAF output to prior probability (Eq.4)"""
+        return self.ppv if paf_pred > 0.5 else 1 - self.npv
+    
+    def _compute_likelihood(self, eaf_pred):
+        """Converts EAF output to likelihood (Eq.5)"""
+        return self.se if eaf_pred > 0.5 else 1 - self.sp
+    
+    def fuse_single(self, clinical_data, ppg_data):
+        """Single evidence fusion (Eq.3)"""
+        paf_pred = self.paf_model.predict(clinical_data.reshape(1, -1))[0][0]
+        eaf_pred = self.eaf_model.predict(ppg_data.reshape(1, -1))[0][0]
+        
+        prior = self._compute_prior(paf_pred)
+        likelihood = self._compute_likelihood(eaf_pred)
+        
+        # Simplified evidence integration
+        posterior = prior * likelihood
+        return posterior
+    
+    def fuse_sequential(self, clinical_data, ppg_sequence):
+        """Recursive evidence fusion (Eq.6-7)"""
+        prior = self._compute_prior(
+            self.paf_model.predict(clinical_data.reshape(1, -1))[0][0]
+        )
+        
+        posterior = prior
+        posterior_history = [posterior]
+        
+        for ppg_data in ppg_sequence:
+            eaf_pred = self.eaf_model.predict(ppg_data.reshape(1, -1))[0][0]
+            likelihood = self._compute_likelihood(eaf_pred)
+            
+            # Bayesian recursive update
+            numerator = likelihood * posterior
+            denominator = numerator + (1 - likelihood) * (1 - posterior)
+            posterior = numerator / denominator
+            
+            posterior_history.append(posterior)
+        
+        return posterior, posterior_history
+
+    def plot_evidence_accumulation(self, posterior_history):
+        """Visualizes performance evolution with accumulating evidence"""
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(len(posterior_history)), posterior_history, 
+                 marker='o', linestyle='-', color='#1f77b4')
+        plt.axhline(y=max(posterior_history), color='r', linestyle='--', 
+                   label=f'Saturation: {max(posterior_history):.4f}')
+        plt.axvline(x=9, color='g', linestyle='--', 
+                   label='Optimal Evidence (9 segments)')
+        
+        plt.title('PEAF Performance Evolution with PPG Evidence Accumulation', fontsize=14)
+        plt.xlabel('Number of PPG Observations', fontsize=12)
+        plt.ylabel('Posterior Probability (P(AF|z))', fontsize=12)
+        plt.grid(alpha=0.2)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('peaf_evidence_accumulation.png', dpi=300)
+        plt.show()
+
+# =====================================================
+# EXPERIMENTAL PIPELINE: Training and Evaluation Workflow
+# =====================================================
+
+def main():
+    # 1. Data generation
+    print("Generating simulated dataset...")
+    generator = DataGenerator(num_samples=2000, af_ratio=0.35)
+    clinical_data, ppg_data, labels = generator.generate_dataset()
+    
+    # 2. Data partitioning
+    X_paf_train, X_paf_val, X_eaf_train, X_eaf_val, y_train, y_val = train_test_split(
+        clinical_data, ppg_data, labels, test_size=0.2, random_state=42
+    )
+    
+    # 3. PAF model training
+    print("\nTraining Clinical Prior Model (PAF)...")
+    paf = PAFModel()
+    paf_history = paf.train(X_paf_train, y_train)
+    print(f"PAF Validation AUC: {paf_history.history['val_auc'][-1]:.4f}")
+    
+    # 4. EAF model training
+    print("\nTraining PPG Evidence Model (EAF)...")
+    eaf = EAFModel()
+    eaf_history = eaf.train(X_eaf_train, y_train)
+    print(f"EAF Validation AUC: {eaf_history.history['val_auc'][-1]:.4f}")
+    
+    # 5. Bayesian fusion setup
+    peaf = BayesianFusion(paf.model, eaf.model)
+    
+    # 6. Model calibration
+    print("\nCalibrating Bayesian fusion parameters...")
+    peaf.calibrate_models(X_paf_val, X_eaf_val, y_val)
+    print(f"Calibration Results - PPV: {peaf.ppv:.3f}, NPV: {peaf.npv:.3f}, " 
+          f"Sensitivity: {peaf.se:.3f}, Specificity: {peaf.sp:.3f}")
+    
+    # 7. Fusion demonstrations
+    print("\nRunning fusion demonstrations...")
+    
+    # Single fusion example
+    sample_idx = 42
+    posterior = peaf.fuse_single(clinical_data[sample_idx], ppg_data[sample_idx])
+    print(f"Single Fusion Posterior: {posterior:.4f} | True Label: {labels[sample_idx][0]}")
+    
+    # Sequential fusion example
+    ppg_seq = [ppg_data[sample_idx]] * 15  # 15 sequential PPG measurements
+    seq_posterior, posterior_history = peaf.fuse_sequential(
+        clinical_data[sample_idx], ppg_seq)
+    print(f"Sequential Fusion Posterior: {seq_posterior:.4f} | True Label: {labels[sample_idx][0]}")
+    
+    # 8. Visualization of evidence accumulation effect
+    peaf.plot_evidence_accumulation(posterior_history)
+    
+    print("\nImplementation complete. Refer to saved figure: peaf_evidence_accumulation.png")
+
+if __name__ == "__main__":
+    main()
